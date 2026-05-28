@@ -1,0 +1,33 @@
+# Node and frontend build
+node_modules/
+dist/
+build/
+
+# Vite cache
+/.vite/
+
+# Python virtual env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment files
+.env
+backend/.env
+frontend/.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# IDE/editor files
+.vscode/
+.idea/
+.DS_Store
