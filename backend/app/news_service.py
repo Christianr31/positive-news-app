@@ -246,6 +246,10 @@ class NewsService:
         self._ttl_seconds = CACHE_TTL_SECONDS
         self._live_data_enabled = False
 
+    @staticmethod
+    def _today_key(suffix: str) -> str:
+        return f"{suffix}:{datetime.now(timezone.utc).date().isoformat()}"
+
     def _cached(self, key: str) -> Any | None:
         cached = self._cache.get(key)
         if not cached:
@@ -308,13 +312,14 @@ class NewsService:
         return str(url)
 
     def get_weekly_highlights(self) -> list[dict[str, Any]]:
-        cached = self._cached("weekly-highlights")
+        cache_key = self._today_key("weekly-highlights")
+        cached = self._cached(cache_key)
         if cached is not None:
             return cached
 
         # Graceful fallback when no key is configured.
         if not self.api_key:
-            self._set_cache("weekly-highlights", WEEKLY_HIGHLIGHTS)
+            self._set_cache(cache_key, WEEKLY_HIGHLIGHTS)
             return WEEKLY_HIGHLIGHTS
 
         highlights: list[dict[str, Any]] = []
@@ -346,11 +351,11 @@ class NewsService:
         if not highlights:
             highlights = WEEKLY_HIGHLIGHTS
 
-        self._set_cache("weekly-highlights", highlights)
+        self._set_cache(cache_key, highlights)
         return highlights
 
     def get_location_stories(self, location_id: str) -> list[dict[str, Any]]:
-        cache_key = f"location:{location_id}"
+        cache_key = self._today_key(f"location:{location_id}")
         cached = self._cached(cache_key)
         if cached is not None:
             return cached
@@ -393,9 +398,6 @@ class NewsService:
             self._live_data_enabled = False
         else:
             self._live_data_enabled = True
-
-        self._set_cache(cache_key, stories)
-        return stories
 
         self._set_cache(cache_key, stories)
         return stories
