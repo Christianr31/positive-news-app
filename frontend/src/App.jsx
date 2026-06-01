@@ -3,7 +3,7 @@ import Globe from 'globe.gl'
 import axios from 'axios'
 import * as THREE from 'three'
 
-const API_BASE = 'http://127.0.0.1:8000'
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://positive-news-app.onrender.com'
 
 function storyKey(story, index) {
   return story.id || story.location_id || `story-${index}`
