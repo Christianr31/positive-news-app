@@ -37,17 +37,17 @@ def get_news_status():
 
 
 @app.get("/api/news/weekly-highlights")
-def get_weekly_highlights():
+async def get_weekly_highlights():
     return {
-        "highlights": news_service.get_weekly_highlights(),
+        "highlights": await news_service.get_weekly_highlights(),
         "live_data_enabled": news_service.live_data_enabled,
     }
 
 
 @app.get("/api/news/location-stories")
-def get_location_stories(location_id: str = Query(...)):
+async def get_location_stories(location_id: str = Query(...)):
     return {
         "location_id": location_id,
-        "stories": news_service.get_location_stories(location_id),
+        "stories": await news_service.get_location_stories(location_id),
         "live_data_enabled": news_service.live_data_enabled,
     }

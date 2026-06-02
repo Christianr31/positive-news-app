@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -245,6 +246,10 @@ class NewsService:
         self._cache: dict[str, tuple[float, Any]] = {}
         self._ttl_seconds = CACHE_TTL_SECONDS
         self._live_data_enabled = False
+        self._request_in_progress: dict[str, asyncio.Task[Any]] = {}
+        # Limit to 3 concurrent requests to stay within NewsAPI free tier (~100/day)
+        # This allows multiple users while respecting rate limits
+        self._semaphore = asyncio.Semaphore(3)
 
     @staticmethod
     def _today_key(suffix: str) -> str:
@@ -286,15 +291,18 @@ class NewsService:
             "apiKey": self.api_key,
         }
 
-    def _fetch_location_articles(self, location_query: str) -> list[dict[str, Any]]:
+    async def _fetch_location_articles_async(self, location_query: str) -> list[dict[str, Any]]:
+        """Fetch articles with semaphore to throttle requests within NewsAPI rate limits."""
         if not self.api_key:
             return []
-        params = self._news_api_params(location_query)
-        with httpx.Client(timeout=12.0) as client:
-            response = client.get(NEWS_API_BASE, params=params)
-            response.raise_for_status()
-            payload = response.json()
-        return payload.get("articles", [])
+        
+        async with self._semaphore:
+            params = self._news_api_params(location_query)
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                response = await client.get(NEWS_API_BASE, params=params)
+                response.raise_for_status()
+                payload = response.json()
+            return payload.get("articles", [])
 
     @staticmethod
     def _normalize_summary(article: dict[str, Any]) -> str:
@@ -311,41 +319,29 @@ class NewsService:
             return None
         return str(url)
 
-    def get_weekly_highlights(self) -> list[dict[str, Any]]:
+    async def get_weekly_highlights(self) -> list[dict[str, Any]]:
         cache_key = self._today_key("weekly-highlights")
         cached = self._cached(cache_key)
         if cached is not None:
             return cached
+
+        # Check if request is already in progress (deduplication)
+        if cache_key in self._request_in_progress:
+            return await self._request_in_progress[cache_key]
 
         # Graceful fallback when no key is configured.
         if not self.api_key:
             self._set_cache(cache_key, WEEKLY_HIGHLIGHTS)
             return WEEKLY_HIGHLIGHTS
 
-        highlights: list[dict[str, Any]] = []
-        for location in TRACKED_LOCATIONS:
-            try:
-                articles = self._fetch_location_articles(location["query"])
-            except Exception:
-                continue
-            if not articles:
-                continue
-            top = articles[0]
-            highlights.append(
-                {
-                    "location_id": location["location_id"],
-                    "city": location["city"],
-                    "country": location["country"],
-                    "lat": location["lat"],
-                    "lng": location["lng"],
-                    "title": top.get("title", "Positive update this week"),
-                    "summary": self._normalize_summary(top),
-                    "url": top.get("url"),
-                    "image_url": self._image_url(top),
-                    "source": (top.get("source") or {}).get("name"),
-                    "published_at": top.get("publishedAt"),
-                }
-            )
+        # Create task for deduplication
+        task = asyncio.create_task(self._fetch_weekly_highlights_concurrent())
+        self._request_in_progress[cache_key] = task
+
+        try:
+            highlights = await task
+        finally:
+            self._request_in_progress.pop(cache_key, None)
 
         self._live_data_enabled = bool(highlights)
         if not highlights:
@@ -354,11 +350,53 @@ class NewsService:
         self._set_cache(cache_key, highlights)
         return highlights
 
-    def get_location_stories(self, location_id: str) -> list[dict[str, Any]]:
+    async def _fetch_weekly_highlights_concurrent(self) -> list[dict[str, Any]]:
+        """Fetch highlights from all locations in parallel."""
+        tasks = [
+            self._fetch_location_articles_async(location["query"])
+            for location in TRACKED_LOCATIONS
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        highlights: list[dict[str, Any]] = []
+        
+        for location, result in zip(TRACKED_LOCATIONS, results):
+            try:
+                if isinstance(result, Exception):
+                    continue
+                articles = result
+                if not articles:
+                    continue
+                top = articles[0]
+                highlights.append(
+                    {
+                        "location_id": location["location_id"],
+                        "city": location["city"],
+                        "country": location["country"],
+                        "lat": location["lat"],
+                        "lng": location["lng"],
+                        "title": top.get("title", "Positive update this week"),
+                        "summary": self._normalize_summary(top),
+                        "url": top.get("url"),
+                        "image_url": self._image_url(top),
+                        "source": (top.get("source") or {}).get("name"),
+                        "published_at": top.get("publishedAt"),
+                    }
+                )
+            except Exception:
+                continue
+        
+        return highlights
+
+    async def get_location_stories(self, location_id: str) -> list[dict[str, Any]]:
         cache_key = self._today_key(f"location:{location_id}")
         cached = self._cached(cache_key)
         if cached is not None:
             return cached
+
+        # Check if request is already in progress (deduplication)
+        if cache_key in self._request_in_progress:
+            return await self._request_in_progress[cache_key]
 
         location = next(
             (loc for loc in TRACKED_LOCATIONS if loc["location_id"] == location_id), None
@@ -373,12 +411,24 @@ class NewsService:
             self._set_cache(cache_key, fallback)
             return fallback
 
+        # Create task for deduplication
+        task = asyncio.create_task(self._fetch_location_stories_async(location_id, location))
+        self._request_in_progress[cache_key] = task
+
         try:
-            articles = self._fetch_location_articles(location["query"])
+            stories = await task
+        finally:
+            self._request_in_progress.pop(cache_key, None)
+
+        self._set_cache(cache_key, stories)
+        return stories
+
+    async def _fetch_location_stories_async(self, location_id: str, location: dict[str, Any]) -> list[dict[str, Any]]:
+        """Fetch stories for a single location with fallback."""
+        try:
+            articles = await self._fetch_location_articles_async(location["query"])
         except Exception:
-            fallback = LOCATION_STORIES.get(location_id, [])
-            self._set_cache(cache_key, fallback)
-            return fallback
+            articles = []
 
         stories = [
             {
@@ -399,5 +449,4 @@ class NewsService:
         else:
             self._live_data_enabled = True
 
-        self._set_cache(cache_key, stories)
         return stories
